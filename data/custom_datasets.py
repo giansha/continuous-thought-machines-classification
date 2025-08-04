@@ -1,11 +1,110 @@
 import torch
-from torchvision.datasets import ImageFolder
+# from torchvision.datasets import ImageFolder
+from sklearn.preprocessing import StandardScaler
+import os
+# import numpy as np
+import pandas as pd
 from torch.utils.data import Dataset
-import random
+# import random
 import numpy as np
-from tqdm.auto import tqdm
-from PIL import Image
+# from tqdm.auto import tqdm
+# from PIL import Image
 from datasets import load_dataset
+
+class BSMSegLoader(Dataset):
+    def __init__(self, args, root_path, win_size, step=1, flag="train", cache_dir=None):
+        self.flag = flag
+        self.step = step
+        self.win_size = win_size
+        self.scaler = StandardScaler()
+
+        # --- 缓存机制的实现 ---
+        # 确定缓存目录
+        if cache_dir is None:
+            # 默认缓存目录在 root_path 下创建一个 'swat_cache' 文件夹
+            self.cache_dir = os.path.join(root_path, 'bsm_cache')
+        else:
+            self.cache_dir = cache_dir
+
+        # 确保缓存目录存在
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+        # 构造缓存文件名。这里将 root_path 的 basename 包含在文件名中
+        # 以便如果存在不同 root_path 但指向同一 cache_dir 的情况，也能区分缓存文件
+        cache_file_name = f"bsm_preprocessed_data_{os.path.basename(root_path)}.npz"
+        self.cache_file_path = os.path.join(self.cache_dir, cache_file_name)
+
+        # 检查缓存文件是否存在
+        if os.path.exists(self.cache_file_path):
+            print(f"Loading data from cache: {self.cache_file_path}")
+            # 从缓存加载数据
+            cached_data = np.load(self.cache_file_path)
+            self.train = cached_data['train']
+            self.test = cached_data['test']
+            self.val = cached_data['val']
+            self.test_labels = cached_data['test_labels']
+            print("Data loaded from cache successfully.")
+        else:
+            print(f"Cache not found ({self.cache_file_path}). Preprocessing data...")
+            # --- 原始数据加载和预处理逻辑 ---
+            train_data = pd.read_csv(os.path.join(root_path, 'normal.csv'))
+            test_data = pd.read_csv(os.path.join(root_path, 'test.csv'))
+            #取前20个
+            labels = test_data.values[:, -1:]
+            train_data = train_data.values[:, 1:21]
+            test_data = test_data.values[:, :20]
+
+            self.scaler.fit(train_data)
+            train_data = self.scaler.transform(train_data)
+            test_data = self.scaler.transform(test_data)
+
+            self.train = train_data
+            self.test = test_data
+            data_len = len(self.train)
+            self.val = self.train[(int)(data_len * 0.8):]
+            self.test_labels = labels
+            # --- 保存预处理后的数据到缓存 ---
+            np.savez_compressed(self.cache_file_path,
+                                train=self.train,
+                                test=self.test,
+                                val=self.val,
+                                test_labels=self.test_labels)
+            print(f"Data preprocessed and saved to cache: {self.cache_file_path}")
+        # --- 缓存机制结束 ---
+
+        print("train shape:", self.train.shape)
+        print("test shape:", self.test.shape)
+        print("val shape:", self.val.shape)
+        print("test_labels shape:", self.test_labels.shape)
+
+    def __len__(self):
+        """
+        Number of images in the object dataset.
+        """
+        if self.flag == "train":
+            return (self.train.shape[0] - self.win_size) // self.step + 1
+        elif (self.flag == 'val'):
+            return (self.val.shape[0] - self.win_size) // self.step + 1
+        elif (self.flag == 'test'):
+            return (self.test.shape[0] - self.win_size) // self.step + 1
+        else:
+            return (self.test.shape[0] - self.win_size) // self.win_size + 1
+
+    def __getitem__(self, index):
+        index = index * self.step
+        if self.flag == "train":
+            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+        elif (self.flag == 'val'):
+            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+        elif (self.flag == 'test'):
+            return np.float32(self.test[index:index + self.win_size]), np.float32(
+                self.test_labels[index:index + self.win_size])
+        else:
+            return np.float32(self.test[
+                              index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
+                self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
+
+
 
 class SortDataset(Dataset):
     def __init__(self, N):
@@ -139,173 +238,173 @@ class ImageNet(Dataset):
         target = data_item['label']
         return image, target
   
-class MazeImageFolder(ImageFolder):
-    """
-    A custom dataset class that extends the ImageFolder class.
-
-    Args:
-        root (string): Root directory path.
-        transform (callable, optional): A function/transform that takes in
-            a sample and returns a transformed version.
-            E.g, ``transforms.RandomCrop`` for images.
-        target_transform (callable, optional): A function/transform that takes
-            in the target and transforms it.
-        loader (callable, optional): A function to load an image given its path.
-        is_valid_file (callable, optional): A function that takes path of an Image file
-            and check if the file is a valid file (used to check of corrupt files)
-
-    Attributes:
-        classes (list): List of the class names.
-        class_to_idx (dict): Dict with items (class_name, class_index).
-        imgs (list): List of (image path, class_index) tuples
-    """
-
-    def __init__(self, root, transform=None, target_transform=None,
-                 loader=Image.open, 
-                 is_valid_file=None, 
-                 which_set='train', 
-                 augment_p=0.5,
-                 maze_route_length=10, 
-                 trunc=False,
-                 expand_range=True):
-        super(MazeImageFolder, self).__init__(root, transform, target_transform, loader, is_valid_file)
-        self.which_set = which_set
-        self.augment_p = augment_p
-        self.maze_route_length = maze_route_length
-        self.all_paths = {}
-        self.trunc = trunc
-        self.expand_range = expand_range
-        
-        self._preload()
-        print('Solving all mazes...')
-        for index in range(len(self.preloaded_samples)):
-            path = self.get_solution(self.preloaded_samples[index])
-            self.all_paths[index] = path
-
-    def _preload(self):
-        preloaded_samples = []
-        with tqdm(total=self.__len__(), initial=0, leave=True, position=0, dynamic_ncols=True) as pbar:
-            
-            for index in range(self.__len__()):
-                pbar.set_description('Loading mazes')
-                path, target = self.samples[index]
-                sample = self.loader(path)   
-                sample = np.array(sample).astype(np.float32)/255     
-                preloaded_samples.append(sample)
-                pbar.update(1)
-                if self.trunc and index == 999: break
-        self.preloaded_samples = preloaded_samples
-
-    def __len__(self):
-        if hasattr(self, 'preloaded_samples') and self.preloaded_samples is not None:
-            return len(self.preloaded_samples)
-        else:
-            return super().__len__()
-        
-    def get_solution(self, x):
-        x = np.copy(x)
-        # Find start (red) and end (green) pixel coordinates
-        start_coords = np.argwhere((x == [1, 0, 0]).all(axis=2))
-        end_coords = np.argwhere((x == [0, 1, 0]).all(axis=2))
-
-        if len(start_coords) == 0 or len(end_coords) == 0:
-            print("Start or end point not found.")
-            return None
-        
-        start_y, start_x = start_coords[0]
-        end_y, end_x = end_coords[0]
-
-        current_y, current_x = start_y, start_x
-        path = [4] * self.maze_route_length
-
-        pi = 0
-        while (current_y, current_x) != (end_y, end_x):
-            next_y, next_x = -1, -1  # Initialize to invalid coordinates
-            direction = -1  # Initialize to an invalid direction
-
-
-            # Check Up
-            if current_y > 0 and ((x[current_y - 1, current_x] == [0, 0, 1]).all() or (x[current_y - 1, current_x] == [0, 1, 0]).all()):
-                next_y, next_x = current_y - 1, current_x
-                direction = 0
-
-            # Check Down
-            elif current_y < x.shape[0] - 1 and ((x[current_y + 1, current_x] == [0, 0, 1]).all() or (x[current_y + 1, current_x] == [0, 1, 0]).all()):
-                next_y, next_x = current_y + 1, current_x
-                direction = 1
-
-            # Check Left
-            elif current_x > 0 and ((x[current_y, current_x - 1] == [0, 0, 1]).all() or (x[current_y, current_x - 1] == [0, 1, 0]).all()):
-                next_y, next_x = current_y, current_x - 1
-                direction = 2
-                
-            # Check Right
-            elif current_x < x.shape[1] - 1 and ((x[current_y, current_x + 1] == [0, 0, 1]).all() or (x[current_y, current_x + 1] == [0, 1, 0]).all()):
-                next_y, next_x = current_y, current_x + 1
-                direction = 3
-
-            
-            path[pi] = direction
-            pi += 1
-            
-            x[current_y, current_x] = [255,255,255] # mark the current as white to avoid going in circles
-            current_y, current_x = next_y, next_x
-            if pi == len(path): 
-                break
-
-        return np.array(path)
-
-    def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
-
-        Returns:
-            tuple: (sample, target) where target is class_index of the target class.
-        """
-        
-        sample = np.copy(self.preloaded_samples[index])
-        
-        path = np.copy(self.all_paths[index])
-        
-        if self.which_set == 'train':
-            # Randomly rotate -90 or +90 degrees
-            if random.random() < self.augment_p:
-                which_rot = random.choice([-1, 1])
-                sample = np.rot90(sample, k=which_rot, axes=(0, 1))
-                for pi in range(len(path)):
-                    if path[pi] == 0: path[pi] = 3 if which_rot == -1 else 2
-                    elif path[pi] == 1: path[pi] = 2 if which_rot == -1 else 3
-                    elif path[pi] == 2: path[pi] = 0 if which_rot == -1 else 1
-                    elif path[pi] == 3: path[pi] = 1 if which_rot == -1 else 0
-                    
-
-            # Random horizontal flip
-            if random.random() < self.augment_p:
-                sample = np.fliplr(sample)
-                for pi in range(len(path)):
-                    if path[pi] == 2: path[pi] = 3
-                    elif path[pi] == 3: path[pi] = 2
-                
-
-            # Random vertical flip
-            if random.random() < self.augment_p:
-                sample = np.flipud(sample)
-                for pi in range(len(path)):
-                    if path[pi] == 0: path[pi] = 1
-                    elif path[pi] == 1: path[pi] = 0
-                
-        sample = torch.from_numpy(np.copy(sample)).permute(2,0,1)
-        
-        blue_mask = (sample[0] == 0) & (sample[1] == 0) & (sample[2] == 1)
-
-        sample[:, blue_mask] = 1
-        target = path
-
-
-        if not self.expand_range:
-            return sample, target
-        return (sample*2)-1, (target)
+# class MazeImageFolder(ImageFolder):
+#     """
+#     A custom dataset class that extends the ImageFolder class.
+#
+#     Args:
+#         root (string): Root directory path.
+#         transform (callable, optional): A function/transform that takes in
+#             a sample and returns a transformed version.
+#             E.g, ``transforms.RandomCrop`` for images.
+#         target_transform (callable, optional): A function/transform that takes
+#             in the target and transforms it.
+#         loader (callable, optional): A function to load an image given its path.
+#         is_valid_file (callable, optional): A function that takes path of an Image file
+#             and check if the file is a valid file (used to check of corrupt files)
+#
+#     Attributes:
+#         classes (list): List of the class names.
+#         class_to_idx (dict): Dict with items (class_name, class_index).
+#         imgs (list): List of (image path, class_index) tuples
+#     """
+#
+#     def __init__(self, root, transform=None, target_transform=None,
+#                  loader=Image.open,
+#                  is_valid_file=None,
+#                  which_set='train',
+#                  augment_p=0.5,
+#                  maze_route_length=10,
+#                  trunc=False,
+#                  expand_range=True):
+#         super(MazeImageFolder, self).__init__(root, transform, target_transform, loader, is_valid_file)
+#         self.which_set = which_set
+#         self.augment_p = augment_p
+#         self.maze_route_length = maze_route_length
+#         self.all_paths = {}
+#         self.trunc = trunc
+#         self.expand_range = expand_range
+#
+#         self._preload()
+#         print('Solving all mazes...')
+#         for index in range(len(self.preloaded_samples)):
+#             path = self.get_solution(self.preloaded_samples[index])
+#             self.all_paths[index] = path
+#
+#     def _preload(self):
+#         preloaded_samples = []
+#         with tqdm(total=self.__len__(), initial=0, leave=True, position=0, dynamic_ncols=True) as pbar:
+#
+#             for index in range(self.__len__()):
+#                 pbar.set_description('Loading mazes')
+#                 path, target = self.samples[index]
+#                 sample = self.loader(path)
+#                 sample = np.array(sample).astype(np.float32)/255
+#                 preloaded_samples.append(sample)
+#                 pbar.update(1)
+#                 if self.trunc and index == 999: break
+#         self.preloaded_samples = preloaded_samples
+#
+#     def __len__(self):
+#         if hasattr(self, 'preloaded_samples') and self.preloaded_samples is not None:
+#             return len(self.preloaded_samples)
+#         else:
+#             return super().__len__()
+#
+#     def get_solution(self, x):
+#         x = np.copy(x)
+#         # Find start (red) and end (green) pixel coordinates
+#         start_coords = np.argwhere((x == [1, 0, 0]).all(axis=2))
+#         end_coords = np.argwhere((x == [0, 1, 0]).all(axis=2))
+#
+#         if len(start_coords) == 0 or len(end_coords) == 0:
+#             print("Start or end point not found.")
+#             return None
+#
+#         start_y, start_x = start_coords[0]
+#         end_y, end_x = end_coords[0]
+#
+#         current_y, current_x = start_y, start_x
+#         path = [4] * self.maze_route_length
+#
+#         pi = 0
+#         while (current_y, current_x) != (end_y, end_x):
+#             next_y, next_x = -1, -1  # Initialize to invalid coordinates
+#             direction = -1  # Initialize to an invalid direction
+#
+#
+#             # Check Up
+#             if current_y > 0 and ((x[current_y - 1, current_x] == [0, 0, 1]).all() or (x[current_y - 1, current_x] == [0, 1, 0]).all()):
+#                 next_y, next_x = current_y - 1, current_x
+#                 direction = 0
+#
+#             # Check Down
+#             elif current_y < x.shape[0] - 1 and ((x[current_y + 1, current_x] == [0, 0, 1]).all() or (x[current_y + 1, current_x] == [0, 1, 0]).all()):
+#                 next_y, next_x = current_y + 1, current_x
+#                 direction = 1
+#
+#             # Check Left
+#             elif current_x > 0 and ((x[current_y, current_x - 1] == [0, 0, 1]).all() or (x[current_y, current_x - 1] == [0, 1, 0]).all()):
+#                 next_y, next_x = current_y, current_x - 1
+#                 direction = 2
+#
+#             # Check Right
+#             elif current_x < x.shape[1] - 1 and ((x[current_y, current_x + 1] == [0, 0, 1]).all() or (x[current_y, current_x + 1] == [0, 1, 0]).all()):
+#                 next_y, next_x = current_y, current_x + 1
+#                 direction = 3
+#
+#
+#             path[pi] = direction
+#             pi += 1
+#
+#             x[current_y, current_x] = [255,255,255] # mark the current as white to avoid going in circles
+#             current_y, current_x = next_y, next_x
+#             if pi == len(path):
+#                 break
+#
+#         return np.array(path)
+#
+#     def __getitem__(self, index):
+#         """
+#         Args:
+#             index (int): Index
+#
+#         Returns:
+#             tuple: (sample, target) where target is class_index of the target class.
+#         """
+#
+#         sample = np.copy(self.preloaded_samples[index])
+#
+#         path = np.copy(self.all_paths[index])
+#
+#         if self.which_set == 'train':
+#             # Randomly rotate -90 or +90 degrees
+#             if random.random() < self.augment_p:
+#                 which_rot = random.choice([-1, 1])
+#                 sample = np.rot90(sample, k=which_rot, axes=(0, 1))
+#                 for pi in range(len(path)):
+#                     if path[pi] == 0: path[pi] = 3 if which_rot == -1 else 2
+#                     elif path[pi] == 1: path[pi] = 2 if which_rot == -1 else 3
+#                     elif path[pi] == 2: path[pi] = 0 if which_rot == -1 else 1
+#                     elif path[pi] == 3: path[pi] = 1 if which_rot == -1 else 0
+#
+#
+#             # Random horizontal flip
+#             if random.random() < self.augment_p:
+#                 sample = np.fliplr(sample)
+#                 for pi in range(len(path)):
+#                     if path[pi] == 2: path[pi] = 3
+#                     elif path[pi] == 3: path[pi] = 2
+#
+#
+#             # Random vertical flip
+#             if random.random() < self.augment_p:
+#                 sample = np.flipud(sample)
+#                 for pi in range(len(path)):
+#                     if path[pi] == 0: path[pi] = 1
+#                     elif path[pi] == 1: path[pi] = 0
+#
+#         sample = torch.from_numpy(np.copy(sample)).permute(2,0,1)
+#
+#         blue_mask = (sample[0] == 0) & (sample[1] == 0) & (sample[2] == 1)
+#
+#         sample[:, blue_mask] = 1
+#         target = path
+#
+#
+#         if not self.expand_range:
+#             return sample, target
+#         return (sample*2)-1, (target)
 
 class ParityDataset(Dataset):
     def __init__(self, sequence_length=64, length=100000):

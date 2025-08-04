@@ -20,3 +20,5 @@ examples/*
 !examples/03_mazes.ipynb
 !examples/04_parity.ipynb
 checkpoints
+!/examples/05_timeseris.ipynb
+!/data/data_factory.py

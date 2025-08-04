@@ -12,6 +12,11 @@ from models.constants import (
     VALID_BACKBONE_TYPES,
     VALID_POSITIONAL_EMBEDDING_TYPES
 )
+from models.modules import CustomRotationalEmbedding1D
+
+
+# 确保原始的 ContinuousThoughtMachine 类也已导入
+# from ctm_original_code import ContinuousThoughtMachine
 
 class ContinuousThoughtMachine(nn.Module):
     """
@@ -473,12 +478,15 @@ class ContinuousThoughtMachine(nn.Module):
             raise ValueError(f"Invalid neuron selection type: {self.neuron_select_type}")
         return synch_representation_size
 
-
-
-
-    def forward(self, x, track=False):
-        B = x.size(0)
-        device = x.device
+    def forward(self, x, track=False, precomputed_kv=None):
+        # 如果没有提供x，则必须提供预计算的kv
+        if x is None:
+            assert precomputed_kv is not None, "Either x or precomputed_kv must be provided."
+            B = precomputed_kv.size(0)
+            device = precomputed_kv.device
+        else:
+            B = x.size(0)
+            device = x.device
 
         # --- Tracking Initialization ---
         pre_activations_tracking = []
@@ -488,7 +496,10 @@ class ContinuousThoughtMachine(nn.Module):
         attention_tracking = []
 
         # --- Featurise Input Data ---
-        kv = self.compute_features(x)
+        if precomputed_kv is not None:
+            kv = precomputed_kv
+        else:
+            kv = self.compute_features(x)
 
         # --- Initialise Recurrent State ---
         state_trace = self.start_trace.unsqueeze(0).expand(B, -1, -1) # Shape: (B, H, T)

@@ -237,6 +237,26 @@ class SuperLinear(nn.Module):
 
 
 # --- Backbone Modules ---
+class TemporalBackbone(nn.Module):
+    """
+    一个简单的1D CNN Backbone，用于从时序数据中提取特征。
+    输入: (B, C_in, T) -> 输出: (B, C_out, T)
+    """
+
+    def __init__(self, input_channels, output_channels, seq_len, kernel_size=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(input_channels, output_channels // 2, kernel_size, padding='same'),
+            nn.ReLU(),
+            nn.LayerNorm([output_channels // 2, seq_len]),  # LayerNorm在时序上
+            nn.Conv1d(output_channels // 2, output_channels, kernel_size, padding='same'),
+            nn.ReLU(),
+            nn.LayerNorm([output_channels, seq_len])
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
 
 class ParityBackbone(nn.Module):
     def __init__(self, n_embeddings, d_embedding):
